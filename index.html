@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="bn">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart MCQ Master</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- CSS for Math Rendering -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV" crossorigin="anonymous">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['"Hind Siliguri"', 'sans-serif'],
+            },
+            colors: {
+              background: '#000000', // Pure Black
+              surface: '#0a0a0a',    // Very Dark Gray
+              surfaceHighlight: '#171717', // Slightly lighter
+              primary: '#dc2626',    // red-600
+              secondary: '#9ca3af',  // gray-400
+            },
+            animation: {
+              'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            }
+          },
+        },
+      };
+    </script>
+    <style>
+      body {
+        background-color: #000000;
+        color: #f8fafc;
+        font-family: 'Hind Siliguri', sans-serif;
+      }
+      /* Custom scrollbar for dark theme */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #000000;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #333;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #ef4444; /* red-500 hover */
+      }
+      
+      /* Markdown Styles */
+      .markdown-content p {
+        margin-bottom: 0.75rem;
+        line-height: 1.7;
+      }
+      .markdown-content ul {
+        list-style-type: disc;
+        padding-left: 1.5rem;
+        margin-bottom: 0.75rem;
+      }
+      .markdown-content li {
+        margin-bottom: 0.25rem;
+      }
+      .markdown-content strong {
+        color: #f87171; /* red-400 for bold emphasis */
+        font-weight: 700;
+      }
+      .markdown-content .katex {
+        font-size: 1.1em;
+      }
+      /* Highlight Box Style for Blockquotes */
+      .markdown-content blockquote {
+        background-color: rgba(220, 38, 38, 0.1); /* Red tint */
+        border-left: 4px solid #dc2626;
+        padding: 1rem;
+        margin: 1rem 0;
+        border-radius: 0.5rem;
+        font-style: italic;
+        color: #e2e8f0;
+      }
+      .markdown-content h1, .markdown-content h2, .markdown-content h3 {
+        font-weight: 700;
+        margin-top: 1.5rem;
+        margin-bottom: 0.75rem;
+        color: #fff;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.33.0",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react-markdown": "https://esm.sh/react-markdown@9?bundle",
+    "remark-math": "https://esm.sh/remark-math@6?bundle",
+    "rehype-katex": "https://esm.sh/rehype-katex@7?bundle"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

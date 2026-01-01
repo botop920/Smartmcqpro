@@ -1,0 +1,5 @@
+{
+  "name": "Smart MCQ Master",
+  "description": "PDF বা ছবি থেকে MCQ এক্সট্র্যাক্ট করুন, লেকচার স্লাইড থেকে প্রশ্ন তৈরি করুন এবং AI টিউটরের সাহায্যে প্রস্তুতি নিন।",
+  "requestFramePermissions": []
+}
