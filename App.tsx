@@ -144,12 +144,16 @@ function App() {
           });
       }
 
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
       setIsProcessing(false);
       setIsBackgroundExtracting(false);
+      
+      // If we have some content, don't show error immediately, just stop.
+      // But if we have NOTHING, show the error.
       if (questions.length === 0 && notes.length === 0 && writtenQuestions.length === 0) {
-          alert("ফাইল পড়তে সমস্যা হয়েছে।");
+          const errorMessage = err.message || "অজানা সমস্যা হয়েছে";
+          alert(`ফাইল পড়তে সমস্যা হয়েছে।\nত্রুটি: ${errorMessage}`);
       }
     }
   };

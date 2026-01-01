@@ -19,9 +19,10 @@ export const fileToGenerativePart = async (file: File): Promise<string> => {
 };
 
 const getClient = () => {
-    // Safety check for process.env
-    const apiKey = typeof process !== 'undefined' && process.env ? process.env.API_KEY : undefined;
-    if (!apiKey) throw new Error("API Key not found");
+    // Directly access process.env.API_KEY so Vite can perform build-time replacement.
+    // Do NOT check for typeof process or process.env existence, as that prevents replacement logic in browsers.
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) throw new Error("API Key not found. Please set the API_KEY environment variable.");
     return new GoogleGenAI({ apiKey });
 }
 
