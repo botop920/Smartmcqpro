@@ -103,8 +103,8 @@ const AIChat: React.FC<AIChatProps> = ({ question }) => {
   };
 
   return (
-    <div className="mt-8 pt-6 border-t border-neutral-800 animate-fade-in">
-      <div className="bg-surface rounded-2xl border border-neutral-800 overflow-hidden shadow-2xl">
+    <div className="mt-8 pt-6 border-t border-neutral-800 animate-fade-in px-4 md:px-0">
+      <div className="md:bg-surface bg-neutral-900/30 md:rounded-2xl md:border md:border-neutral-800 border-0 overflow-hidden md:shadow-2xl rounded-xl">
         
         {/* Header */}
         <div className="bg-neutral-900 p-4 border-b border-neutral-800 flex items-center gap-3">

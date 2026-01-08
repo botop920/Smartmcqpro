@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { Question, NoteSection, WrittenQuestion } from "../types";
+import { Question, NoteSection, WrittenQuestion, ExamType } from "../types";
 
 // Helper to convert file to base64
 export const fileToGenerativePart = async (file: File): Promise<string> => {
@@ -19,105 +19,68 @@ export const fileToGenerativePart = async (file: File): Promise<string> => {
 };
 
 const getClient = () => {
-    // Directly access process.env.API_KEY so Vite can perform build-time replacement.
-    // Do NOT check for typeof process or process.env existence, as that prevents replacement logic in browsers.
     const apiKey = process.env.API_KEY;
     if (!apiKey) throw new Error("API Key not found. Please set the API_KEY environment variable.");
     return new GoogleGenAI({ apiKey });
 }
 
-// Internal Minified Interface for Token Efficiency
 interface MinifiedQuestion {
-    q: string; // text
-    o: string[]; // options
-    a: string; // answer
+    q: string;
+    o: string[];
+    a: string;
 }
 
-// Helper to sanitize/repair JSON if truncated
 const safeParseJSON = (jsonString: string): any[] => {
     try {
         const parsed = JSON.parse(jsonString);
         if (Array.isArray(parsed)) return parsed;
         if (typeof parsed === 'object' && parsed !== null) {
-            // Robustness: If model returns { "questions": [...] } instead of [...], extract the array
             const values = Object.values(parsed);
             const arrayValue = values.find(v => Array.isArray(v));
             if (arrayValue) return arrayValue as any[];
         }
         return [];
     } catch (error: any) {
-        console.warn("JSON Parse failed, attempting repair:", error.message);
-        
         let cleaned = jsonString.trim();
         const firstBracket = cleaned.indexOf('[');
-        if (firstBracket !== -1) {
-            cleaned = cleaned.substring(firstBracket);
-        }
-
+        if (firstBracket !== -1) cleaned = cleaned.substring(firstBracket);
         const lastObjectEnd = cleaned.lastIndexOf('},');
-        
         if (lastObjectEnd !== -1) {
-            cleaned = cleaned.substring(0, lastObjectEnd + 1); 
-            cleaned += ']';
-            try {
-                const repaired = JSON.parse(cleaned);
-                return Array.isArray(repaired) ? repaired : [];
-            } catch (e) {
-                console.error("JSON repair failed:", e);
-            }
+            cleaned = cleaned.substring(0, lastObjectEnd + 1) + ']';
+            try { return JSON.parse(cleaned); } catch (e) {}
         }
         return []; 
     }
 };
 
-// --- LATEX CLEANER ---
-// Removes hallucinated commands that cause KaTeX rendering errors or bad formatting
 const cleanLatex = (text: any): string => {
     if (typeof text !== 'string') return "";
-    
-    // Preliminary Cleanup for specific artifacts reported (imes, ext, mu without backslash)
-    let fixed = text
-        // Fix "imes" -> "\times" (often caused by \t interpretation)
+    return text
+        .replace(/\\t/g, ' ')  // Remove literal \t (common error)
+        .replace(/\t/g, ' ')   // Remove tab characters
         .replace(/(\d|\})\s*imes\s*(\d|10)/g, '$1 \\times $2')
         .replace(/\bimes\b/g, '\\times')
-
-        // Fix "extmu" -> "\mu"
         .replace(/extmu/g, '\\mu')
-        
-        // Fix "ext" followed by Unit (e.g., extV, extJ -> V, J)
         .replace(/(\d)\s*ext([A-Z])/g, '$1 $2')
         .replace(/ext([A-Z])/g, '$1')
-
-        // Fix generic "ext" that should be empty or was \text
         .replace(/\\?ext\{([^}]+)\}/g, '$1')
         .replace(/\\ext\b/g, '')
-
-        // Fix missing backslash for mu if preceded by number
         .replace(/(\d)mu\b/g, '$1\\mu')
-        
-        // Fix degree symbol hallucinations (User reported: "3^e xto")
         .replace(/\^e\s*xto/g, '^\\circ') 
         .replace(/xto/g, '^\\circ')
         .replace(/\^e/g, '^\\circ')
         .replace(/\\text\{o\}/g, '^\\circ')
         .replace(/deg/g, '^\\circ')
-
-        // Fix other common hallucinations
         .replace(/\\oldsymbol/g, '')   
         .replace(/\\extuparrow/g, '\\uparrow') 
         .replace(/\\extdownarrow/g, '\\downarrow') 
         .replace(/\\extrightarrow/g, '\\rightarrow') 
         .replace(/\\style/g, '')       
         .replace(/\\oldtext/g, '')     
-        
-        // Clean up nested braces left behind by removal
         .replace(/\{\s*\{\s*(\\uparrow|\\downarrow|\\rightarrow|\\to)\s*\}\s*\}/g, '$1')
         .replace(/\{\s*(\\uparrow|\\downarrow|\\rightarrow|\\to)\s*\}/g, '$1'); 
-
-    return fixed;
 };
 
-// Generate a random unique ID to prevent React key collisions across multiple files
 const generateUniqueId = () => Math.floor(Date.now() + Math.random() * 1000000);
 
 interface FileData {
@@ -125,7 +88,6 @@ interface FileData {
     data: string;
 }
 
-// --- MODE 1: Extract Existing Questions ---
 export const extractQuestions = async (
     fileData: FileData, 
     onBatch: (newQuestions: Question[]) => void,
@@ -136,173 +98,71 @@ export const extractQuestions = async (
   let hasMore = true;
   let retryCount = 0;
   const MAX_RETRIES = 3;
-  
-  // Start with a decent chunk to populate the list quickly
-  let currentBatchSize = 20; 
 
-  // OPTIMIZATION: Minified keys to save output tokens
   const schema: Schema = {
     type: Type.ARRAY,
     items: {
       type: Type.OBJECT,
       properties: {
-        q: { type: Type.STRING, description: "Question text. Fix broken Bengali unicode." },
-        o: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Options" },
-        a: { type: Type.STRING, description: "Correct Answer" }
+        q: { type: Type.STRING },
+        o: { type: Type.ARRAY, items: { type: Type.STRING } },
+        a: { type: Type.STRING }
       },
       required: ["q", "o", "a"]
     }
   };
 
   while (hasMore) {
-    if (signal?.aborted) {
-        console.log("Extraction aborted by user.");
-        break;
-    }
-
+    if (signal?.aborted) break;
     try {
         const lastQuestion = allQuestions.length > 0 ? allQuestions[allQuestions.length - 1] : null;
-        const lastTextSnippet = lastQuestion ? lastQuestion.text.slice(0, 50) : "";
-
-        const prompt = `Task: Extract MCQ questions from the provided document/image.
-        
-        ${lastQuestion 
-            ? `PREVIOUSLY EXTRACTED LAST QUESTION: "${lastTextSnippet}"... \nINSTRUCTION: Find this question in the document, ignore it, and extract the NEXT ${currentBatchSize} questions appearing immediately after it.` 
-            : `INSTRUCTION: Start extracting from the very BEGINNING of the document. Get the first ${currentBatchSize} questions.`}
-        
-        CRITICAL RULES:
-        1. **FIX BROKEN BENGALI TEXT**: The file might contain decomposed/broken Unicode. Reconstruct them into valid, readable Bengali words.
-        2. **DOUBLE ESCAPE LATEX**: When writing JSON, you MUST double escape backslashes for LaTeX commands. 
-           - **CORRECT**: "\\\\times", "\\\\mu", "\\\\text{V}", "\\\\circ"
-           - **INCORRECT**: "\\times", "\\mu" (these will break JSON parsing or disappear)
-        3. **SCIENTIFIC NOTATION**:
-           - Degrees: Use $^\\circ$.
-           - Units: $100 \\text{V}$ or just $100 V$. 
-           - Symbols: $\\rightarrow, \\uparrow$.
-        4. Infer options if missing labels.
-        5. Solve if answer not marked.
-        6. Return JSON array: q=question, o=options array, a=correct answer string.
-        7. Return [] ONLY if you have reached the absolute end of the document.`;
-
+        const prompt = `Extract MCQs from document. Fix Bengali. Double escape LaTeX. JSON array: q, o, a.`;
         const response = await ai.models.generateContent({
           model: 'gemini-3-flash-preview',
-          contents: {
-            parts: [
-              { inlineData: { mimeType: fileData.mimeType, data: fileData.data } },
-              { text: prompt }
-            ]
-          },
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: schema,
-          }
+          contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
+          config: { responseMimeType: "application/json", responseSchema: schema }
         });
-
-        const minifiedQuestions = response.text ? safeParseJSON(response.text) as MinifiedQuestion[] : [];
-        
-        // Robust filtering to prevent [object Object] and other type errors
-        const newQuestions: Question[] = minifiedQuestions
-            .filter(mq => mq && typeof mq.q === 'string' && Array.isArray(mq.o) && typeof mq.a === 'string')
-            .map(mq => ({
-                id: 0, 
-                text: cleanLatex(mq.q),
-                options: mq.o.map(opt => cleanLatex(opt)),
-                correctAnswer: cleanLatex(mq.a)
-            }));
-
-        const uniqueNewQuestions = newQuestions.filter(nq => 
-            !allQuestions.some(oq => oq.text.includes(nq.text.slice(0, 20)) || nq.text.includes(oq.text.slice(0, 20)))
-        );
-
-        if (uniqueNewQuestions.length === 0) {
-            retryCount++;
-            console.warn(`Batch produced no new questions. Retry ${retryCount}/${MAX_RETRIES}`);
-            
-            if (retryCount >= MAX_RETRIES) {
-                console.log("Max retries reached. Assuming end of document.");
-                hasMore = false;
-            }
-            continue; 
-        }
-
+        const minified = safeParseJSON(response.text) as MinifiedQuestion[];
+        const news = minified.map(mq => ({ id: generateUniqueId(), text: cleanLatex(mq.q), options: mq.o.map(opt => cleanLatex(opt)), correctAnswer: cleanLatex(mq.a) }));
+        if (news.length === 0) { if (++retryCount >= MAX_RETRIES) hasMore = false; continue; }
         retryCount = 0;
-
-        const preparedQuestions = uniqueNewQuestions.map((q) => ({
-            ...q,
-            id: generateUniqueId() // Fix: Use unique ID to prevent key collision
-        }));
-
-        allQuestions = [...allQuestions, ...preparedQuestions];
-        onBatch(preparedQuestions);
-        currentBatchSize = 30;
-
-        if (allQuestions.length >= 500) hasMore = false;
-
-    } catch (error) {
-        console.error("Batch error:", error);
-        if (signal?.aborted) break;
-        
-        retryCount++;
-        if (retryCount >= MAX_RETRIES) {
-             if (allQuestions.length > 0) hasMore = false;
-             else throw error;
-        }
-    }
+        allQuestions = [...allQuestions, ...news];
+        onBatch(news);
+        if (allQuestions.length >= 300) hasMore = false;
+    } catch (error) { if (++retryCount >= MAX_RETRIES) hasMore = false; }
   }
 };
 
-// --- MODE 2: Generate Questions from Slides ---
 export const generateQuestionsFromSlides = async (
     fileData: FileData,
     onBatch: (newQuestions: Question[]) => void,
     signal?: AbortSignal,
-    isVarsity: boolean = false
+    examType: ExamType = 'varsity'
 ): Promise<void> => {
     const ai = getClient();
-    
-    // Define generation batches based on Mode (Varsity vs Engineering)
     let batches = [];
     
-    if (isVarsity) {
-        // VARSITY (DU/RU) - 1 Mark Standard
-        // Characteristics: Conceptual, Calculator-free math, Memory-based, Tricky logic
+    if (examType === 'varsity') {
         batches = [
-            { 
-                label: "DU Core Concepts", 
-                prompt: "Generate 5 'Varsity Standard' MCQs (1 Mark each). Focus on fundamental definitions, core concepts, and direct recall suitable for Dhaka University A Unit." 
-            },
-            { 
-                label: "Calculator-Free Math", 
-                prompt: "Generate 5 MCQs involving short mathematical problems that can be solved WITHOUT a calculator. Use standard values ($g=9.8, \\pi \\approx 3.1416$) and tricky logic." 
-            },
-            { 
-                label: "Conceptual Traps", 
-                prompt: "Generate 5 'Tricky' Conceptual MCQs. Focus on common misconceptions, graph interpretations, and 'What happens if...' scenarios." 
-            },
-            {
-                label: "Mixed Varsity Review",
-                prompt: "Generate 5 mixed difficulty MCQs covering remaining topics. Ensure they are concise and fit the 1-minute time limit per question."
-            }
+            { label: "Varsity Core", prompt: "Generate 5 MCQs (DU A-Unit standard). Concise, conceptual, 4 options each." }
         ];
     } else {
-        // ENGINEERING (BUET/CKRUET) - 6 Mark Standard (converted to MCQ)
-        // Characteristics: Multi-step calculation, Deep analysis, Written-quality problems
+        // CKRUET or BUET style MCQ
+        const standard = examType === 'ckruet' ? "CKRUET (CUET/KUET/RUET)" : "BUET";
+        
+        // Updated instructions for CKRUET specifically focusing on the 3-4 step solvable in 1-1.5 min logic
+        const ckruetConstraint = examType === 'ckruet' ? 
+            "Complexity: Questions must require exactly 3-4 intermediate logical or mathematical steps to solve. These steps should be standard but analytical. A well-practiced student should be able to finish each within 60-90 seconds." : 
+            "Complexity: Highly analytical and challenging questions suitable for BUET standards.";
+
         batches = [
             { 
-                label: "Engineering Analytical", 
-                prompt: "Generate 5 'Engineering Standard' MCQs. These should be equivalent to 6-mark Written Questions but adapted for MCQ format. Focus on complex, multi-step calculations." 
-            },
-            { 
-                label: "Deep Concept & Derivation", 
-                prompt: "Generate 5 Hard MCQs based on derivations and deep physical/chemical mechanisms. Focus on edge cases suitable for BUET/RUET." 
-            },
-            { 
-                label: "Complex Math Application", 
-                prompt: "Generate 5 Mathematical Application MCQs. These should require robust formula application and significant calculation (calculator allowed standard)." 
+                label: `${examType.toUpperCase()} Analytical`, 
+                prompt: `Generate 5 high-standard MCQs for ${standard}. ${ckruetConstraint} Each question is worth 6 marks in value. You MUST provide exactly 5 OPTIONS (A, B, C, D, E).` 
             },
             {
-                label: "Mixed Engineering Review",
-                prompt: "Generate 5 challenging MCQs covering advanced topics and specific engineering applications found in the slides."
+                label: `${examType.toUpperCase()} Math-Heavy`,
+                prompt: `Generate 5 challenging Math/Physics MCQs for ${standard}. Focus on multiple formula applications that flow logically in 3-4 steps. Provide exactly 5 OPTIONS.`
             }
         ];
     }
@@ -312,9 +172,9 @@ export const generateQuestionsFromSlides = async (
         items: {
           type: Type.OBJECT,
           properties: {
-            q: { type: Type.STRING, description: "Question text. Fix broken Bengali unicode." },
-            o: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Options" },
-            a: { type: Type.STRING, description: "Correct Answer" }
+            q: { type: Type.STRING },
+            o: { type: Type.ARRAY, items: { type: Type.STRING }, description: examType === 'varsity' ? "Exactly 4 options" : "Exactly 5 options (Engineering Standard)" },
+            a: { type: Type.STRING }
           },
           required: ["q", "o", "a"]
         }
@@ -322,280 +182,84 @@ export const generateQuestionsFromSlides = async (
 
     for (const batch of batches) {
         if (signal?.aborted) break;
-
         try {
-            const prompt = `
-            Role: Expert Exam Setter for ${isVarsity ? "Dhaka University (DU A-Unit)" : "BUET/CKRUET Engineering Admission"}.
-            Task: ${batch.prompt}
-            
-            Source Material: Analyze the attached Document/Image (Lecture Slides/Notes) thoroughly. extract content from all visible pages/areas.
-            
-            Strict Rules:
-            1. **Language**: Bengali (Standard academic).
-            2. **Unicode Fix**: Ensure Bengali text is perfectly formed.
-            3. **DOUBLE ESCAPE LATEX**: You MUST double escape backslashes in the JSON string.
-               - CORRECT: "\\\\times", "\\\\mu", "\\\\circ"
-               - INCORRECT: "\\times", "\\mu"
-            4. **Scientific Notation**: Use correct LaTeX.
-               - Degrees: $^\\circ$
-               - Arrows: $\\rightarrow, \\rightleftharpoons, \\uparrow, \\downarrow$.
-            5. **Quality**: Options must be plausible distractors. Strictly one correct answer.
-            6. **Format**: Return JSON array only.
-            7. **Tags**: DO NOT add difficulty tags in 'q'.
-            `;
+            const prompt = `Expert Exam Setter for ${examType.toUpperCase()} Admission. 
+            Task: ${batch.prompt}. 
+            Source Context: Use the provided document/slides.
+            Strictest Requirements: 
+            - Language: Bengali. 
+            - Options: ${examType === 'varsity' ? "4" : "5"}.
+            - Math Rendering: Use Double Escaped LaTeX ($...$).
+            - Tone: Formal academic Bengali.
+            Return ONLY a JSON array.`;
 
             const response = await ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
-                contents: {
-                  parts: [
-                    { inlineData: { mimeType: fileData.mimeType, data: fileData.data } },
-                    { text: prompt }
-                  ]
-                },
-                config: {
-                  responseMimeType: "application/json",
-                  responseSchema: schema,
-                }
+                contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
+                config: { responseMimeType: "application/json", responseSchema: schema }
             });
-      
-            const minifiedQuestions = response.text ? safeParseJSON(response.text) as MinifiedQuestion[] : [];
-              
-            if (minifiedQuestions.length > 0) {
-                const newQuestions: Question[] = minifiedQuestions
-                .filter(mq => mq && typeof mq.q === 'string' && Array.isArray(mq.o) && typeof mq.a === 'string')
-                .map((mq) => ({
-                    id: generateUniqueId(),
-                    text: cleanLatex(`[${batch.label}] ${mq.q}`),
-                    options: mq.o.map(opt => cleanLatex(opt)),
-                    correctAnswer: cleanLatex(mq.a)
-                }));
-                
-                onBatch(newQuestions);
+            const minified = safeParseJSON(response.text) as MinifiedQuestion[];
+            if (minified.length > 0) {
+                onBatch(minified.map(mq => ({ id: generateUniqueId(), text: cleanLatex(`[${batch.label}] ${mq.q}`), options: mq.o.map(opt => cleanLatex(opt)), correctAnswer: cleanLatex(mq.a) })));
             }
-
-        } catch (error) {
-            console.error(`Error generating batch ${batch.label}:`, error);
-            if (signal?.aborted) break;
-            // Continue to next batch even if one fails
-        }
+        } catch (error) {}
     }
 };
 
-// --- MODE 3: Generate Compact Notes ---
 export const generateStudyNotes = async (
     fileData: FileData,
     onBatch: (newNotes: NoteSection[]) => void,
     signal?: AbortSignal,
-    isVarsity: boolean = false
+    examType: ExamType = 'varsity'
 ): Promise<void> => {
     const ai = getClient();
-    
     const schema: Schema = {
         type: Type.ARRAY,
         items: {
             type: Type.OBJECT,
-            properties: {
-                title: { type: Type.STRING, description: "Topic title" },
-                content: { type: Type.STRING, description: "Structured revision note content in Markdown." },
-                importance: { type: Type.STRING, enum: ["High", "Medium", "Normal"] }
-            },
+            properties: { title: { type: Type.STRING }, content: { type: Type.STRING }, importance: { type: Type.STRING, enum: ["High", "Medium", "Normal"] } },
             required: ["title", "content", "importance"]
         }
     };
-
-    const engineeringPrompt = `
-    Role: You are an expert STEM educator specializing in engineering university admission exams (like BUET, KUET, RUET, IUT). 
-
-    Task: Analyze the provided document/image (Lecture Slide/Note) and generate a 'High-Yield Master Note' that is sufficient for both written and MCQ engineering exams.
-
-    Generate a structured note for EACH key topic found in the content.
-    
-    STRICT LANGUAGE RULE:
-    - **DETECT THE LANGUAGE OF THE SOURCE.** (Likely Bengali/Bangla).
-    - **WRITE THE EXPLANATIONS IN THE SAME LANGUAGE.**
-    - If the slides are in Bengali, the notes MUST be in **Bengali**.
-    - If the slides are in English, use English.
-    - **KEEP THE SECTION HEADERS (e.g., 'Core Concept & Definitions') IN ENGLISH** to maintain structure for the app.
-    - Mathematical terms and formulas should remain in standard scientific notation/English.
-
-    STRICT CONTENT STRUCTURE (Use these headers in Markdown for the 'content' field):
-
-    1. **Core Concept & Definitions:** List all fundamental concepts. Do not just define them; explain the 'Why' and 'How' based on the slide's depth.
-    2. **All Formulas & Units:** Extract every single mathematical formula. Define each variable and provide its standard unit. Highlight any specific conditions for a formula to be applicable. Use LaTeX ($...$) for math.
-    3. **Chemical Reactions & Mechanisms:** Transcribe every chemical equation ($...$) from the slides. For mechanisms (like Hydrolysis or Hybridization), explain the step-by-step electron movement or orbital overlapping.
-    4. **Graphs, Trends & Exceptions:** Identify all graphs. Explain the relationship between the axes. Specifically, point out and explain any 'Exceptions' or 'Dips/Peaks' in the trends (e.g., anomalies in melting/boiling points).
-    5. **Problem Solving Shortcuts:** If the slides contain any special techniques or shortcuts for fast calculation, list them clearly.
-    6. **Comparative Tables:** Create Markdown tables to compare related topics (e.g., Diamond vs Graphite, Strong vs Weak Ligands).
-    7. **PYQ Context:** Based on the 'Importance Table' in the slides or general knowledge, list which topics are most frequent in BUET/RUET/KUET exams.
-
-    Constraint: Do not skip any numerical data or specific reactions. Ensure the explanations match the original slide language (e.g. Bengali).
-    
-    Output: JSON Array of Note objects.
-    `;
-    
-    const varsityPrompt = `
-    Role: You are a University Admission Specialist for DU A-Unit, expert in Physics, Chemistry, and Mathematics.
-
-    Task: Analyze the uploaded document/image (Lecture Slides) and generate a "DU Success Compact Note" that covers 100% of the conceptual depth required for MCQ and concise Written sections.
-
-    Generate a structured note for EACH key topic found in the content.
-    
-    STRICT LANGUAGE RULE:
-    - **DETECT THE LANGUAGE OF THE SOURCE.** (Likely Bengali/Bangla).
-    - **WRITE THE EXPLANATIONS IN THE SAME LANGUAGE.**
-    - If the slides are in Bengali, the notes MUST be in **Bengali**.
-    - If the slides are in English, use English.
-    - **HEADERS MUST BE IN BENGALI.**
-    - Mathematical terms and formulas should remain in standard scientific notation/English.
-
-    STRICT CONTENT STRUCTURE (Use these EXACT Bengali headers in Markdown for the 'content' field):
-
-    1. **কনসেপচুয়াল MCQ ট্রিক্স:** Identify all Exceptions, Trends, and Comparison Orders (e.g., Ionization Energy, Boiling Point trends, Graph behaviors in Physics, or Function domains in Math). Highlight "What happens if..." scenarios that are common in DU conceptual questions.
-    2. **লিখিত অংশের মূল থিওরি:** Summarize key theories, derivations (Physics), or mechanisms (Chemistry) in exactly 2-3 bullet points. Focus on the "Core Logic" (e.g., why a certain result occurs) to fit DU's small written answer space.
-    3. **ফর্মুলা ও শর্টকাট ব্যাংক:** Extract all Formulas (Physics), Reactions (Chemistry), and Identities/Shortcuts (Math). Define variables and mention specific conditions/constraints for each formula. Use LaTeX ($...$) for math.
-    4. **হাতে-কলমে ক্যালকুলেশন:** Identify numerical problems and provide logic for fast mental calculation. Include unit conversions and constant values (e.g., h, G, R, or unit multipliers like 1 eV/atom = 96.48 kJ/mol).
-    5. **মনে রাখার ছন্দ (Mnemonics):** Capture every mnemonic or "Chondo" mentioned in the slides for memorizing lists or complex orders.
-    6. **গ্রাফ ও চিত্র বিশ্লেষণ:** Briefly describe the nature of graphs (Linear, Inverse, Parabolic) and what the slope/area represents (especially for Physics).
-    7. **সতর্কতা ও গুরুত্ব (🔴):** Mark topics as 'DU MUST-READ', 'MCQ TRAP', or 'WRITTEN CORE'. Use the red circle emoji in the header.
-
-    Constraint: Avoid long paragraphs. Use tables, bold keywords, and bullet points to ensure 100% scannability. Use a mix of Bengali and English terms as used in the lectures.
-    
-    Output: JSON Array of Note objects.
-    `;
-
-    try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
-            contents: {
-                parts: [
-                    { inlineData: { mimeType: fileData.mimeType, data: fileData.data } },
-                    { text: isVarsity ? varsityPrompt : engineeringPrompt }
-                ]
-            },
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: schema,
-                temperature: 0.2, // Slightly higher than 0.1 to allow for better phrasing but still structured
-                topP: 0.95,
-                topK: 40
-            }
-        });
-
-        const generatedNotes = response.text ? safeParseJSON(response.text) as Omit<NoteSection, 'id'>[] : [];
-        
-        if (generatedNotes.length > 0) {
-            const newNotes: NoteSection[] = generatedNotes
-            .filter(n => n && typeof n.content === 'string')
-            .map((n) => ({
-                id: generateUniqueId(),
-                ...n,
-                content: cleanLatex(n.content)
-            } as NoteSection));
-            onBatch(newNotes);
-        }
-
-    } catch (error) {
-        console.error("Error generating notes:", error);
-        throw error;
-    }
+    const prompt = `Generate structured revision notes for ${examType.toUpperCase()} admission. Use Bengali markdown. Focus on core concepts and traps.`;
+    const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
+        config: { responseMimeType: "application/json", responseSchema: schema }
+    });
+    const notes = safeParseJSON(response.text) as Omit<NoteSection, 'id'>[];
+    onBatch(notes.map(n => ({ id: generateUniqueId(), ...n, content: cleanLatex(n.content) })));
 };
 
-// --- MODE 4: Generate Written Questions ---
 export const generateWrittenQuestions = async (
     fileData: FileData,
     onBatch: (newQuestions: WrittenQuestion[]) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    examType: ExamType = 'buet'
 ): Promise<void> => {
     const ai = getClient();
-    
-    // Schema update: Added 'subject' field to force categorization
     const schema: Schema = {
         type: Type.ARRAY,
         items: {
             type: Type.OBJECT,
-            properties: {
-                subject: { type: Type.STRING, description: "The Subject Name (e.g. Physics, Chemistry, Math, Biology). Must be detected from context." },
-                question: { type: Type.STRING, description: "The written question text. MUST be in the same language as the input PDF." },
-                answer: { type: Type.STRING, description: "Detailed step-by-step solution/answer in Markdown." },
-                marks: { type: Type.STRING, description: "Estimated marks (e.g. 2.5, 5, 10)" },
-                type: { type: Type.STRING, enum: ["Theory", "Math", "Short Note"] }
-            },
+            properties: { subject: { type: Type.STRING }, question: { type: Type.STRING }, answer: { type: Type.STRING }, marks: { type: Type.STRING }, type: { type: Type.STRING, enum: ["Theory", "Math", "Short Note"] } },
             required: ["subject", "question", "answer", "marks", "type"]
         }
     };
-
-    // Single robust prompt to handle subject detection and grouping
-    const prompt = `
-    Role: University Admission Exam Setter (Written Part - DU/BUET Standard).
-    
-    Task: Analyze the uploaded Document/Image (Exam Paper/Slide).
-    1. **Identify ALL distinct subjects** covered in the document (e.g., Physics, Chemistry, Higher Math, Biology, ICT).
-    2. For EACH subject found, generate **4-6 High-Quality Written Questions**.
-    3. **STRICTLY GROUP/TAG** each question with its correct 'subject'. Do not mix Physics questions under Chemistry.
-    
-    **Content Rules**:
-    - **Language**: STRICTLY MATCH the language of the source text. (If PDF is Bengali, output Bengali. If English, output English).
-    - **Mix**: Include both 'Theoretical/Conceptual' (Why/How/Explain) and 'Mathematical/Derivation' questions for each subject.
-    - **Standard**: Questions should be at the level of University Admission Tests.
-    
-    **Formatting**:
-    - **LaTeX**: Double escape backslashes ($...$). Use $^\\circ$ for degrees.
-    - Output a JSON Array.
-    `;
-
-    try {
-        if (signal?.aborted) return;
-
-        const response = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
-            contents: {
-              parts: [
-                { inlineData: { mimeType: fileData.mimeType, data: fileData.data } },
-                { text: prompt }
-              ]
-            },
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: schema,
-              temperature: 0.2
-            }
-        });
-
-        const generated = response.text ? safeParseJSON(response.text) as Omit<WrittenQuestion, 'id'>[] : [];
-
-        if (generated.length > 0) {
-             const newQuestions: WrittenQuestion[] = generated.map(q => ({
-                 id: generateUniqueId(),
-                 subject: cleanLatex(q.subject || "General"), // Fallback if subject missing
-                 question: cleanLatex(q.question),
-                 answer: cleanLatex(q.answer),
-                 marks: q.marks,
-                 type: q.type as any
-             }));
-             onBatch(newQuestions);
-        }
-    } catch(e) {
-        console.error("Error generating written questions:", e);
-        throw e;
-    }
+    const prompt = `Generate ${examType.toUpperCase()} standard written questions. Must have detailed step-by-step model solutions in Bengali. JSON array.`;
+    const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
+        config: { responseMimeType: "application/json", responseSchema: schema }
+    });
+    const generated = safeParseJSON(response.text) as Omit<WrittenQuestion, 'id'>[];
+    onBatch(generated.map(q => ({ id: generateUniqueId(), ...q, subject: cleanLatex(q.subject || "General"), question: cleanLatex(q.question), answer: cleanLatex(q.answer) })));
 };
 
 export const createTutoringChat = (question: Question) => {
     const ai = getClient();
-    const systemInstruction = `You are an expert AI tutor.
-    Context:
-    Q: ${question.text}
-    Options: ${question.options.join(', ')}
-    Answer: ${question.correctAnswer}
-
-    Task: Explain the solution in Bengali.
-    - **Fix any broken Bengali text** in the explanation.
-    - Use Markdown & LaTeX ($...$).
-    - Do NOT use non-standard LaTeX like \\oldsymbol, \\ext, \\oldtext, \\style, \\extuparrow, xto, ^e.
-    - Be concise and encouraging.`;
-
     return ai.chats.create({
         model: 'gemini-3-flash-preview',
-        config: { systemInstruction }
+        config: { systemInstruction: `Expert AI tutor. Explain solution in Bengali for: ${question.text}. Use LaTeX ($...$).` }
     });
 };

@@ -5,6 +5,8 @@ export interface Question {
   correctAnswer: string; // The text of the correct option
 }
 
+export type ExamType = 'varsity' | 'ckruet' | 'buet';
+
 export interface WrittenQuestion {
   id: number;
   subject: string; // e.g. "Physics", "Chemistry", "Higher Math"

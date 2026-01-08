@@ -74,6 +74,20 @@
       .markdown-content .katex {
         font-size: 1.1em;
       }
+      /* KaTeX Overflow Handling */
+      .katex-display {
+        overflow-x: auto;
+        overflow-y: hidden;
+        max-width: 100%;
+      }
+      .katex {
+        white-space: normal !important;
+        max-width: 100%;
+      }
+      .katex-html {
+        white-space: normal !important;
+      }
+      
       /* Highlight Box Style for Blockquotes */
       .markdown-content blockquote {
         background-color: rgba(220, 38, 38, 0.1); /* Red tint */
