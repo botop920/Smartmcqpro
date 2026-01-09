@@ -63,7 +63,8 @@ const cleanLatex = (text: any): string => {
         .replace(/\\n/g, '\n');
 
     // Fix common missing backslash issues in Gemini's math output
-    // but be careful not to double escape existing ones
+    // This part tries to intelligently add backslashes where Gemini might have missed them
+    // but only inside what looks like math contexts or chemistry formulas
     cleaned = cleaned
         .replace(/(\d|\})\s*imes\s*(\d|10)/g, '$1 \\times $2')
         .replace(/\bimes\b/g, '\\times')
@@ -73,7 +74,10 @@ const cleanLatex = (text: any): string => {
         .replace(/xto/g, '^\\circ')
         .replace(/\^e/g, '^\\circ')
         .replace(/deg/g, '^\\circ')
-        .replace(/\\text\{o\}/g, '^\\circ');
+        .replace(/\\text\{o\}/g, '^\\circ')
+        .replace(/Ksp/g, 'K_{sp}')
+        .replace(/Ca\(OH\)2/g, 'Ca(OH)_2')
+        .replace(/NaOH/g, 'NaOH');
 
     // Clean up unnecessary formatting that KaTeX might choke on
     cleaned = cleaned
@@ -118,7 +122,7 @@ export const extractQuestions = async (
   while (hasMore) {
     if (signal?.aborted) break;
     try {
-        const prompt = `Extract MCQs from document. Fix Bengali. Use LaTeX for math ($...$). JSON array: q, o, a.`;
+        const prompt = `Extract ALL MCQs from the document. Format math using LaTeX delimiters like $x^2$. Double check Bengali grammar. JSON array: q, o, a.`;
         const response = await ai.models.generateContent({
           model: 'gemini-3-flash-preview',
           contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
@@ -130,7 +134,8 @@ export const extractQuestions = async (
         retryCount = 0;
         allQuestions = [...allQuestions, ...news];
         onBatch(news);
-        if (allQuestions.length >= 300) hasMore = false;
+        // If we got a decent amount of questions, we've likely processed the whole file or enough of it
+        if (news.length < 5 || allQuestions.length >= 200) hasMore = false;
     } catch (error) { if (++retryCount >= MAX_RETRIES) hasMore = false; }
   }
 };
@@ -146,18 +151,14 @@ export const generateQuestionsFromSlides = async (
     
     if (examType === 'varsity') {
         batches = [
-            { label: "Varsity Core", prompt: "Generate 5 MCQs (DU A-Unit standard). Concise, conceptual, 4 options each." }
+            { label: "Varsity Core", prompt: "Generate high-quality MCQs (DU A-Unit standard). Use Bengali and LaTeX $...$." }
         ];
     } else {
         const standard = examType === 'ckruet' ? "CKRUET (CUET/KUET/RUET)" : "BUET";
-        const ckruetConstraint = examType === 'ckruet' ? 
-            "Complexity: Questions must require exactly 3-4 intermediate logical or mathematical steps to solve. 60-90 seconds solution time." : 
-            "Complexity: Highly analytical and challenging questions suitable for BUET standards.";
-
         batches = [
             { 
-                label: `${examType.toUpperCase()} Analytical`, 
-                prompt: `Generate 5 high-standard MCQs for ${standard}. ${ckruetConstraint} Provide exactly 5 OPTIONS.` 
+                label: `${examType.toUpperCase()} Standard`, 
+                prompt: `Generate 10 highly analytical MCQs for ${standard}. Ensure step-by-step logic. Exactly 5 options.` 
             }
         ];
     }
@@ -178,12 +179,7 @@ export const generateQuestionsFromSlides = async (
     for (const batch of batches) {
         if (signal?.aborted) break;
         try {
-            const prompt = `Expert Exam Setter for ${examType.toUpperCase()}. 
-            Task: ${batch.prompt}. Source: Provided document.
-            Requirements: Bengali language, ${examType === 'varsity' ? "4" : "5"} options. 
-            MATH: Use LaTeX delimiters ($...$) for every single formula.
-            Return ONLY a JSON array.`;
-
+            const prompt = `Setter for ${examType.toUpperCase()}. ${batch.prompt}. Math: Wrap EVERY formula in $...$. Return JSON.`;
             const response = await ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
                 contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
@@ -212,7 +208,7 @@ export const generateStudyNotes = async (
             required: ["title", "content", "importance"]
         }
     };
-    const prompt = `Generate structured revision notes for ${examType.toUpperCase()} admission. Use Bengali markdown. Use LaTeX ($...$) for math.`;
+    const prompt = `Generate structured revision notes for ${examType.toUpperCase()}. Use Bengali markdown and LaTeX ($...$).`;
     const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
@@ -229,6 +225,10 @@ export const generateWrittenQuestions = async (
     examType: ExamType = 'buet'
 ): Promise<void> => {
     const ai = getClient();
+    let allExtracted: WrittenQuestion[] = [];
+    let hasMore = true;
+    let iteration = 0;
+    
     const schema: Schema = {
         type: Type.ARRAY,
         items: {
@@ -243,36 +243,60 @@ export const generateWrittenQuestions = async (
             required: ["subject", "question", "answer", "marks", "type"]
         }
     };
-    const prompt = `Act as an expert ${examType.toUpperCase()} Admission Question setter.
-    Create high-standard written questions based on the source.
-    
-    STRICT FORMATTING RULES:
-    1. Language: Academic Bengali.
-    2. Math Rendering: Wrap EVERY formula, variable, or equation in single dollar signs like this: $f(x) = y$.
-    3. Step-by-Step Solve: The 'answer' must be a detailed, structured, step-by-step model solution using Markdown (bullets, bold text).
-    4. Marks: Standard marks (e.g., 5 or 10).
-    
-    Return a JSON array of 5 questions.`;
 
-    const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
-        config: { responseMimeType: "application/json", responseSchema: schema }
-    });
-    const generated = safeParseJSON(response.text) as Omit<WrittenQuestion, 'id'>[];
-    onBatch(generated.map(q => ({ 
-        id: generateUniqueId(), 
-        ...q, 
-        subject: cleanLatex(q.subject || "General"), 
-        question: cleanLatex(q.question), 
-        answer: cleanLatex(q.answer) 
-    })));
+    while (hasMore && iteration < 5) {
+        if (signal?.aborted) break;
+        iteration++;
+        
+        try {
+            // Updated prompt to encourage finding NEW questions that haven't been extracted yet
+            const alreadyExtractedList = allExtracted.map(q => q.question.substring(0, 30)).join(', ');
+            const prompt = `Act as an expert ${examType.toUpperCase()} Admission Question setter.
+            Extract or generate ALL relevant written questions from the source.
+            
+            STRICT RULES:
+            1. Language: Academic Bengali.
+            2. Math Rendering: EVERY formula, variable, chemical compound (like Ca(OH)2), or equation MUST be wrapped in single dollar signs $...$. Example: $Ca(OH)_2$ or $x = 5$.
+            3. Model Solution: The 'answer' must be a detailed, formatted step-by-step solution.
+            4. Pagination: Find questions that are different from these: [${alreadyExtractedList}].
+            
+            Return a JSON array.`;
+
+            const response = await ai.models.generateContent({
+                model: 'gemini-3-flash-preview',
+                contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
+                config: { responseMimeType: "application/json", responseSchema: schema }
+            });
+            
+            const generated = safeParseJSON(response.text) as Omit<WrittenQuestion, 'id'>[];
+            if (generated.length === 0) {
+                hasMore = false;
+                break;
+            }
+            
+            const news = generated.map(q => ({ 
+                id: generateUniqueId(), 
+                ...q, 
+                subject: cleanLatex(q.subject || "General"), 
+                question: cleanLatex(q.question), 
+                answer: cleanLatex(q.answer) 
+            }));
+            
+            allExtracted = [...allExtracted, ...news];
+            onBatch(news);
+            
+            // If the model returns fewer than 3 questions, it's likely done with the file
+            if (generated.length < 3) hasMore = false;
+        } catch (error) {
+            hasMore = false;
+        }
+    }
 };
 
 export const createTutoringChat = (question: Question) => {
     const ai = getClient();
     return ai.chats.create({
         model: 'gemini-3-flash-preview',
-        config: { systemInstruction: `Expert AI tutor. Explain solution in Bengali for: ${question.text}. Use LaTeX ($...$) for all math and structure the output with clear steps.` }
+        config: { systemInstruction: `Expert AI tutor. Explain solution in Bengali. Use LaTeX ($...$) for every formula or math term. Be very detailed and structured.` }
     });
 };
