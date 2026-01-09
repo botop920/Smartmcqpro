@@ -56,34 +56,34 @@ const safeParseJSON = (jsonString: string): any[] => {
 const cleanLatex = (text: any): string => {
     if (typeof text !== 'string') return "";
     
-    // First, fix literal control character escape errors from Gemini
     let cleaned = text
         .replace(/\\t/g, ' ')  
         .replace(/\t/g, ' ')   
         .replace(/\\n/g, '\n');
 
-    // Fix common missing backslash issues in Gemini's math output
-    // This part tries to intelligently add backslashes where Gemini might have missed them
-    // but only inside what looks like math contexts or chemistry formulas
+    // Recovery logic for mangled LaTeX (Gemini often drops backslashes or characters)
     cleaned = cleaned
-        .replace(/(\d|\})\s*imes\s*(\d|10)/g, '$1 \\times $2')
+        // Fix fractions
+        .replace(/\\?rac\{/g, '\\frac{')
+        .replace(/\brac\{/g, '\\frac{')
+        // Fix times/multiplication
+        .replace(/\\?imes\b/g, '\\times')
         .replace(/\bimes\b/g, '\\times')
-        .replace(/extmu/g, '\\mu')
-        .replace(/(\d)\s*mu\b/g, '$1\\mu')
-        .replace(/\^e\s*xto/g, '^\\circ') 
-        .replace(/xto/g, '^\\circ')
-        .replace(/\^e/g, '^\\circ')
-        .replace(/deg/g, '^\\circ')
-        .replace(/\\text\{o\}/g, '^\\circ')
+        // Fix mangled units (extkg -> \text{kg}, extm -> \text{m}, etc.)
+        .replace(/ext(kg|m|s|min|sec|Watt|hp|W|V|A|K|C|J|N|Pa|Hz|mol|L|g|cm|mm|km)\b/g, '\\text{$1}')
+        .replace(/(\d)ext/g, '$1 \\text')
+        .replace(/ext\{(.*?)\}/g, '\\text{$1}')
+        .replace(/text\{(.*?)\}/g, '\\text{$1}')
+        // Fix specific admission test notations
         .replace(/Ksp/g, 'K_{sp}')
         .replace(/Ca\(OH\)2/g, 'Ca(OH)_2')
-        .replace(/NaOH/g, 'NaOH');
+        .replace(/NaOH/g, 'NaOH')
+        .replace(/deg/g, '^\\circ')
+        .replace(/\^e\b/g, '^\\circ')
+        .replace(/xto/g, '^\\circ');
 
-    // Clean up unnecessary formatting that KaTeX might choke on
-    cleaned = cleaned
-        .replace(/\\boldsymbol/g, '')   
-        .replace(/\\style/g, '')       
-        .replace(/\\oldtext/g, '');
+    // Clean up decorative backslashes that don't belong to any command
+    cleaned = cleaned.replace(/\\(?![a-zA-Z{}()\[\]$])/g, '');
 
     return cleaned;
 };
@@ -103,8 +103,7 @@ export const extractQuestions = async (
   const ai = getClient();
   let allQuestions: Question[] = [];
   let hasMore = true;
-  let retryCount = 0;
-  const MAX_RETRIES = 3;
+  let iteration = 0;
 
   const schema: Schema = {
     type: Type.ARRAY,
@@ -119,24 +118,28 @@ export const extractQuestions = async (
     }
   };
 
-  while (hasMore) {
+  while (hasMore && iteration < 10) {
     if (signal?.aborted) break;
+    iteration++;
     try {
-        const prompt = `Extract ALL MCQs from the document. Format math using LaTeX delimiters like $x^2$. Double check Bengali grammar. JSON array: q, o, a.`;
+        const prompt = `Extract every single MCQ from the document. This is iteration ${iteration}. 
+        Find questions NOT already extracted.
+        Math: Must use proper LaTeX $...$. Use \\frac for fractions and \\text{} for units.
+        JSON array: q, o, a.`;
+        
         const response = await ai.models.generateContent({
           model: 'gemini-3-flash-preview',
           contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
           config: { responseMimeType: "application/json", responseSchema: schema }
         });
         const minified = safeParseJSON(response.text) as MinifiedQuestion[];
+        if (minified.length === 0) { hasMore = false; break; }
+        
         const news = minified.map(mq => ({ id: generateUniqueId(), text: cleanLatex(mq.q), options: mq.o.map(opt => cleanLatex(opt)), correctAnswer: cleanLatex(mq.a) }));
-        if (news.length === 0) { if (++retryCount >= MAX_RETRIES) hasMore = false; continue; }
-        retryCount = 0;
         allQuestions = [...allQuestions, ...news];
         onBatch(news);
-        // If we got a decent amount of questions, we've likely processed the whole file or enough of it
-        if (news.length < 5 || allQuestions.length >= 200) hasMore = false;
-    } catch (error) { if (++retryCount >= MAX_RETRIES) hasMore = false; }
+        if (minified.length < 5 || allQuestions.length >= 300) hasMore = false;
+    } catch (error) { hasMore = false; }
   }
 };
 
@@ -151,14 +154,14 @@ export const generateQuestionsFromSlides = async (
     
     if (examType === 'varsity') {
         batches = [
-            { label: "Varsity Core", prompt: "Generate high-quality MCQs (DU A-Unit standard). Use Bengali and LaTeX $...$." }
+            { label: "Standard", prompt: "Generate as many high-quality MCQs as possible covering the whole document. Use Bengali and proper LaTeX." }
         ];
     } else {
         const standard = examType === 'ckruet' ? "CKRUET (CUET/KUET/RUET)" : "BUET";
         batches = [
             { 
                 label: `${examType.toUpperCase()} Standard`, 
-                prompt: `Generate 10 highly analytical MCQs for ${standard}. Ensure step-by-step logic. Exactly 5 options.` 
+                prompt: `Analyze the whole file and generate all possible standard MCQs for ${standard}. Use exactly 5 options.` 
             }
         ];
     }
@@ -179,7 +182,7 @@ export const generateQuestionsFromSlides = async (
     for (const batch of batches) {
         if (signal?.aborted) break;
         try {
-            const prompt = `Setter for ${examType.toUpperCase()}. ${batch.prompt}. Math: Wrap EVERY formula in $...$. Return JSON.`;
+            const prompt = `${batch.prompt}. STRICT: Use \\frac for fractions, \\text{} for units, and wrap everything in $...$. Bengali language. JSON output.`;
             const response = await ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
                 contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
@@ -208,7 +211,7 @@ export const generateStudyNotes = async (
             required: ["title", "content", "importance"]
         }
     };
-    const prompt = `Generate structured revision notes for ${examType.toUpperCase()}. Use Bengali markdown and LaTeX ($...$).`;
+    const prompt = `Comprehensive notes for ${examType.toUpperCase()}. Bengali. Math in $...$. Use proper LaTeX commands.`;
     const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
@@ -228,6 +231,7 @@ export const generateWrittenQuestions = async (
     let allExtracted: WrittenQuestion[] = [];
     let hasMore = true;
     let iteration = 0;
+    const MAX_ITERATIONS = 15; // Increased significantly to find ALL questions
     
     const schema: Schema = {
         type: Type.ARRAY,
@@ -244,23 +248,21 @@ export const generateWrittenQuestions = async (
         }
     };
 
-    while (hasMore && iteration < 5) {
+    while (hasMore && iteration < MAX_ITERATIONS) {
         if (signal?.aborted) break;
         iteration++;
         
         try {
-            // Updated prompt to encourage finding NEW questions that haven't been extracted yet
-            const alreadyExtractedList = allExtracted.map(q => q.question.substring(0, 30)).join(', ');
-            const prompt = `Act as an expert ${examType.toUpperCase()} Admission Question setter.
-            Extract or generate ALL relevant written questions from the source.
+            const alreadyExtractedList = allExtracted.map(q => q.question.substring(0, 20)).join(', ');
+            const prompt = `Extract all WRITTEN questions from the source file. This is iteration ${iteration}.
+            Scan the entire document and extract questions NOT in this list: [${alreadyExtractedList}].
             
             STRICT RULES:
-            1. Language: Academic Bengali.
-            2. Math Rendering: EVERY formula, variable, chemical compound (like Ca(OH)2), or equation MUST be wrapped in single dollar signs $...$. Example: $Ca(OH)_2$ or $x = 5$.
-            3. Model Solution: The 'answer' must be a detailed, formatted step-by-step solution.
-            4. Pagination: Find questions that are different from these: [${alreadyExtractedList}].
+            1. Language: Bengali.
+            2. LaTeX: Wrap all math in $...$. Use \\frac, \\times, \\text{}, etc. Do NOT skip backslashes.
+            3. Detailed Solve: 'answer' must be a full step-by-step markdown solution.
             
-            Return a JSON array.`;
+            Return a JSON array. If no more questions exist, return an empty array [].`;
 
             const response = await ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
@@ -285,8 +287,8 @@ export const generateWrittenQuestions = async (
             allExtracted = [...allExtracted, ...news];
             onBatch(news);
             
-            // If the model returns fewer than 3 questions, it's likely done with the file
-            if (generated.length < 3) hasMore = false;
+            // If less than 2 new questions found, we are likely at the end of the file
+            if (generated.length < 2) hasMore = false;
         } catch (error) {
             hasMore = false;
         }
@@ -297,6 +299,6 @@ export const createTutoringChat = (question: Question) => {
     const ai = getClient();
     return ai.chats.create({
         model: 'gemini-3-flash-preview',
-        config: { systemInstruction: `Expert AI tutor. Explain solution in Bengali. Use LaTeX ($...$) for every formula or math term. Be very detailed and structured.` }
+        config: { systemInstruction: `Expert Admission Tutor. Bengali language. Use perfect LaTeX ($...$) for every variable, unit, and formula. Explain clearly step by step.` }
     });
 };
