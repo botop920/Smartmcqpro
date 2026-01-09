@@ -55,30 +55,33 @@ const safeParseJSON = (jsonString: string): any[] => {
 
 const cleanLatex = (text: any): string => {
     if (typeof text !== 'string') return "";
-    return text
-        .replace(/\\t/g, ' ')  // Remove literal \t (common error)
-        .replace(/\t/g, ' ')   // Remove tab characters
+    
+    // First, fix literal control character escape errors from Gemini
+    let cleaned = text
+        .replace(/\\t/g, ' ')  
+        .replace(/\t/g, ' ')   
+        .replace(/\\n/g, '\n');
+
+    // Fix common missing backslash issues in Gemini's math output
+    // but be careful not to double escape existing ones
+    cleaned = cleaned
         .replace(/(\d|\})\s*imes\s*(\d|10)/g, '$1 \\times $2')
         .replace(/\bimes\b/g, '\\times')
         .replace(/extmu/g, '\\mu')
-        .replace(/(\d)\s*ext([A-Z])/g, '$1 $2')
-        .replace(/ext([A-Z])/g, '$1')
-        .replace(/\\?ext\{([^}]+)\}/g, '$1')
-        .replace(/\\ext\b/g, '')
-        .replace(/(\d)mu\b/g, '$1\\mu')
+        .replace(/(\d)\s*mu\b/g, '$1\\mu')
         .replace(/\^e\s*xto/g, '^\\circ') 
         .replace(/xto/g, '^\\circ')
         .replace(/\^e/g, '^\\circ')
-        .replace(/\\text\{o\}/g, '^\\circ')
         .replace(/deg/g, '^\\circ')
-        .replace(/\\oldsymbol/g, '')   
-        .replace(/\\extuparrow/g, '\\uparrow') 
-        .replace(/\\extdownarrow/g, '\\downarrow') 
-        .replace(/\\extrightarrow/g, '\\rightarrow') 
+        .replace(/\\text\{o\}/g, '^\\circ');
+
+    // Clean up unnecessary formatting that KaTeX might choke on
+    cleaned = cleaned
+        .replace(/\\boldsymbol/g, '')   
         .replace(/\\style/g, '')       
-        .replace(/\\oldtext/g, '')     
-        .replace(/\{\s*\{\s*(\\uparrow|\\downarrow|\\rightarrow|\\to)\s*\}\s*\}/g, '$1')
-        .replace(/\{\s*(\\uparrow|\\downarrow|\\rightarrow|\\to)\s*\}/g, '$1'); 
+        .replace(/\\oldtext/g, '');
+
+    return cleaned;
 };
 
 const generateUniqueId = () => Math.floor(Date.now() + Math.random() * 1000000);
@@ -115,8 +118,7 @@ export const extractQuestions = async (
   while (hasMore) {
     if (signal?.aborted) break;
     try {
-        const lastQuestion = allQuestions.length > 0 ? allQuestions[allQuestions.length - 1] : null;
-        const prompt = `Extract MCQs from document. Fix Bengali. Double escape LaTeX. JSON array: q, o, a.`;
+        const prompt = `Extract MCQs from document. Fix Bengali. Use LaTeX for math ($...$). JSON array: q, o, a.`;
         const response = await ai.models.generateContent({
           model: 'gemini-3-flash-preview',
           contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
@@ -147,22 +149,15 @@ export const generateQuestionsFromSlides = async (
             { label: "Varsity Core", prompt: "Generate 5 MCQs (DU A-Unit standard). Concise, conceptual, 4 options each." }
         ];
     } else {
-        // CKRUET or BUET style MCQ
         const standard = examType === 'ckruet' ? "CKRUET (CUET/KUET/RUET)" : "BUET";
-        
-        // Updated instructions for CKRUET specifically focusing on the 3-4 step solvable in 1-1.5 min logic
         const ckruetConstraint = examType === 'ckruet' ? 
-            "Complexity: Questions must require exactly 3-4 intermediate logical or mathematical steps to solve. These steps should be standard but analytical. A well-practiced student should be able to finish each within 60-90 seconds." : 
+            "Complexity: Questions must require exactly 3-4 intermediate logical or mathematical steps to solve. 60-90 seconds solution time." : 
             "Complexity: Highly analytical and challenging questions suitable for BUET standards.";
 
         batches = [
             { 
                 label: `${examType.toUpperCase()} Analytical`, 
-                prompt: `Generate 5 high-standard MCQs for ${standard}. ${ckruetConstraint} Each question is worth 6 marks in value. You MUST provide exactly 5 OPTIONS (A, B, C, D, E).` 
-            },
-            {
-                label: `${examType.toUpperCase()} Math-Heavy`,
-                prompt: `Generate 5 challenging Math/Physics MCQs for ${standard}. Focus on multiple formula applications that flow logically in 3-4 steps. Provide exactly 5 OPTIONS.`
+                prompt: `Generate 5 high-standard MCQs for ${standard}. ${ckruetConstraint} Provide exactly 5 OPTIONS.` 
             }
         ];
     }
@@ -173,7 +168,7 @@ export const generateQuestionsFromSlides = async (
           type: Type.OBJECT,
           properties: {
             q: { type: Type.STRING },
-            o: { type: Type.ARRAY, items: { type: Type.STRING }, description: examType === 'varsity' ? "Exactly 4 options" : "Exactly 5 options (Engineering Standard)" },
+            o: { type: Type.ARRAY, items: { type: Type.STRING } },
             a: { type: Type.STRING }
           },
           required: ["q", "o", "a"]
@@ -183,14 +178,10 @@ export const generateQuestionsFromSlides = async (
     for (const batch of batches) {
         if (signal?.aborted) break;
         try {
-            const prompt = `Expert Exam Setter for ${examType.toUpperCase()} Admission. 
-            Task: ${batch.prompt}. 
-            Source Context: Use the provided document/slides.
-            Strictest Requirements: 
-            - Language: Bengali. 
-            - Options: ${examType === 'varsity' ? "4" : "5"}.
-            - Math Rendering: Use Double Escaped LaTeX ($...$).
-            - Tone: Formal academic Bengali.
+            const prompt = `Expert Exam Setter for ${examType.toUpperCase()}. 
+            Task: ${batch.prompt}. Source: Provided document.
+            Requirements: Bengali language, ${examType === 'varsity' ? "4" : "5"} options. 
+            MATH: Use LaTeX delimiters ($...$) for every single formula.
             Return ONLY a JSON array.`;
 
             const response = await ai.models.generateContent({
@@ -221,7 +212,7 @@ export const generateStudyNotes = async (
             required: ["title", "content", "importance"]
         }
     };
-    const prompt = `Generate structured revision notes for ${examType.toUpperCase()} admission. Use Bengali markdown. Focus on core concepts and traps.`;
+    const prompt = `Generate structured revision notes for ${examType.toUpperCase()} admission. Use Bengali markdown. Use LaTeX ($...$) for math.`;
     const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
@@ -242,24 +233,46 @@ export const generateWrittenQuestions = async (
         type: Type.ARRAY,
         items: {
             type: Type.OBJECT,
-            properties: { subject: { type: Type.STRING }, question: { type: Type.STRING }, answer: { type: Type.STRING }, marks: { type: Type.STRING }, type: { type: Type.STRING, enum: ["Theory", "Math", "Short Note"] } },
+            properties: { 
+                subject: { type: Type.STRING }, 
+                question: { type: Type.STRING }, 
+                answer: { type: Type.STRING }, 
+                marks: { type: Type.STRING }, 
+                type: { type: Type.STRING, enum: ["Theory", "Math", "Short Note"] } 
+            },
             required: ["subject", "question", "answer", "marks", "type"]
         }
     };
-    const prompt = `Generate ${examType.toUpperCase()} standard written questions. Must have detailed step-by-step model solutions in Bengali. JSON array.`;
+    const prompt = `Act as an expert ${examType.toUpperCase()} Admission Question setter.
+    Create high-standard written questions based on the source.
+    
+    STRICT FORMATTING RULES:
+    1. Language: Academic Bengali.
+    2. Math Rendering: Wrap EVERY formula, variable, or equation in single dollar signs like this: $f(x) = y$.
+    3. Step-by-Step Solve: The 'answer' must be a detailed, structured, step-by-step model solution using Markdown (bullets, bold text).
+    4. Marks: Standard marks (e.g., 5 or 10).
+    
+    Return a JSON array of 5 questions.`;
+
     const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: { parts: [{ inlineData: { mimeType: fileData.mimeType, data: fileData.data } }, { text: prompt }] },
         config: { responseMimeType: "application/json", responseSchema: schema }
     });
     const generated = safeParseJSON(response.text) as Omit<WrittenQuestion, 'id'>[];
-    onBatch(generated.map(q => ({ id: generateUniqueId(), ...q, subject: cleanLatex(q.subject || "General"), question: cleanLatex(q.question), answer: cleanLatex(q.answer) })));
+    onBatch(generated.map(q => ({ 
+        id: generateUniqueId(), 
+        ...q, 
+        subject: cleanLatex(q.subject || "General"), 
+        question: cleanLatex(q.question), 
+        answer: cleanLatex(q.answer) 
+    })));
 };
 
 export const createTutoringChat = (question: Question) => {
     const ai = getClient();
     return ai.chats.create({
         model: 'gemini-3-flash-preview',
-        config: { systemInstruction: `Expert AI tutor. Explain solution in Bengali for: ${question.text}. Use LaTeX ($...$).` }
+        config: { systemInstruction: `Expert AI tutor. Explain solution in Bengali for: ${question.text}. Use LaTeX ($...$) for all math and structure the output with clear steps.` }
     });
 };
